@@ -20,8 +20,11 @@ typedef enum {
     PassyReadDG11 = 0x010B,
     PassyReadDG12 = 0x010C,
     PassyReadDG13 = 0x010D,
-    PassyReadDG14 = 0x010E,
+    PassyReadDG14 = 0x010E, // short 0E
     PassyReadDG15 = 0x010F,
+    EF_CardAccess = 0x011C, // short 1C
+    EF_Dir = 0x2F00, // short 1E
+
 } PassyReadType;
 
 void passy_log_bitbuffer(char* tag, char* prefix, BitBuffer* buffer);

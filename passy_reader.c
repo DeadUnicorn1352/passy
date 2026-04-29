@@ -1,7 +1,7 @@
 #include "passy_reader.h"
+#include "pace.h"
 
 #define ASN_EMIT_DEBUG 0
-#include <lib/asn1/COM.h>
 
 #define TAG                         "PassyReader"
 #define PASSY_READER_DG1_CHUNK_SIZE 0x20
@@ -541,12 +541,7 @@ NfcCommand passy_reader_state_machine(PassyReader* passy_reader) {
             view_dispatcher_send_custom_event(passy->view_dispatcher, PassyCustomEventReaderError);
             break;
         }
-        ret = passy_reader_get_challenge(passy_reader);
-        if(ret != NfcCommandContinue) {
-            view_dispatcher_send_custom_event(passy->view_dispatcher, PassyCustomEventReaderError);
-            break;
-        }
-        ret = passy_reader_external_authenticate(passy_reader);
+        ret = perform_pace_auth(passy_reader);
         if(ret != NfcCommandContinue) {
             view_dispatcher_send_custom_event(passy->view_dispatcher, PassyCustomEventReaderError);
             break;
