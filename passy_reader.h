@@ -43,3 +43,5 @@ PassyReader* passy_reader_alloc(Passy* passy);
 void passy_reader_free(PassyReader* passy_reader);
 
 void passy_reader_mac(uint8_t* key, uint8_t* data, size_t data_length, uint8_t* mac);
+
+NfcCommand passy_reader_send(PassyReader* passy_reader);

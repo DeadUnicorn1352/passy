@@ -547,7 +547,7 @@ NfcCommand passy_reader_state_machine(PassyReader* passy_reader) {
             break;
         }
         FURI_LOG_I(TAG, "Mutual authentication success");
-        passy_secure_messaging_calculate_session_keys(passy_reader->secure_messaging);
+        // passy_secure_messaging_calculate_session_keys(passy_reader->secure_messaging);
         use_secure_messaging = true;
         view_dispatcher_send_custom_event(
             passy->view_dispatcher, PassyCustomEventReaderAuthenticated);

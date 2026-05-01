@@ -126,7 +126,7 @@ void passy_secure_messaging_wrap_apdu(SecureMessaging* secure_messaging, BitBuff
     memcpy(cmd_header, message, 4);
     cmd_header[0] |= 0x0c;
     cmd_header[4] = 0x80;
-
+    // todo here use 128 bit for ssc and aes instead of 3des
     uint8_t D087[3 + 8];
     if(payload_length > 0) {
         const uint8_t* payload = message + 5;

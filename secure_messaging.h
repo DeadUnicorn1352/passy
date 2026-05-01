@@ -25,7 +25,7 @@ typedef struct {
 
     uint8_t KSenc[16];
     uint8_t KSmac[16];
-    uint8_t SSC[8];
+    uint8_t SSC[8]; // need to use 16 bytes for aes128
 
 } SecureMessaging;
 
