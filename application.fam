@@ -5,7 +5,7 @@ App(
     name="Passport Reader",  # Displayed in menus
     apptype=FlipperAppType.EXTERNAL,
     entry_point="passy_app",
-    stack_size=3 * 1024,
+    stack_size=2 * 1024,
     fap_category="NFC",
     # Optional values
     fap_version="1.5",
@@ -18,11 +18,12 @@ App(
     sources=["*.c*", "!*.css"],
     cdefines=[
         "MBEDTLS_ECP_DP_BP256R1_ENABLED",
+        "MBEDTLS_CMAC_C",
         "MBEDTLS_HMAC_DRBG_C", "MBEDTLS_ENTROPY_C", "MBEDTLS_PSA_CRYPTO_C", "MBEDTLS_NO_PLATFORM_ENTROPY"], # "lib/mbedtls/include/mbedtls/mbedtls_config.h", 
     fap_private_libs=[
         Lib(
             name="asn1",
-            cflags=["-Wno-error", "-DASN_EMIT_DEBUG=0", "-Os", "-DASN_DISABLE_PER_SUPPORT=1"],
+            cflags=["-g","-Wno-error", "-DASN_EMIT_DEBUG=0", "-Os", "-DASN_DISABLE_PER_SUPPORT=1"],
         ),
         Lib(
             name="mbedtls",
@@ -43,7 +44,7 @@ App(
             #     "des.c",
             #     "psa_util.c"
             # ],
-            cflags=["-mword-relocations", "-Wno-error", "-mlong-calls", "-Wno-redundant-decls"],
+            cflags=["-g", "-mword-relocations", "-Wno-error", "-mlong-calls", "-Wno-redundant-decls"],
         ),
     ],
 )

@@ -18,7 +18,13 @@
 #define V_ASN1_PRIMITIVE_TAG 0x1F
 #define V_ASN1_CONSTRUCTED   0x20
 
+// need only 16 bytes as per 9.7.1.2 for aes-128
+#define AES_128_KS_SIZE 16
+#define KS_SIZE         AES_128_KS_SIZE
+
 #define NONCE_SIZE 16
+
+#define ARRAYSIZE(x) (sizeof x / sizeof x[0])
 
 int f_rng(void*, unsigned char* buff, size_t size) {
     furi_hal_random_fill_buf(buff, size);
@@ -26,7 +32,7 @@ int f_rng(void*, unsigned char* buff, size_t size) {
     return 0;
 }
 
-NfcCommand send_mse_at(PassyReader* passy_reader, uint8_t enc_nonce[NONCE_SIZE]) {
+NfcCommand send_mse_at(PassyReader* passy_reader) {
     FURI_LOG_D(TAG, "start send_mse_at");
     uint8_t lc = 0x0F; // todo: constant lc
     uint8_t header[5] = {0x00, 0x22, 0xC1, 0xA4, lc};
@@ -40,28 +46,35 @@ NfcCommand send_mse_at(PassyReader* passy_reader, uint8_t enc_nonce[NONCE_SIZE])
     uint8_t pass[3] = {0x83, 0x01, MRZ};
 
     // todo can be optimized
-    uint8_t payload[sizeof(header) + sizeof(pace_ecdh_genmap_aes128) + sizeof(pass)];
-    memcpy(payload, header, sizeof(header));
-    memcpy(payload + sizeof(header), pace_ecdh_genmap_aes128, sizeof(pace_ecdh_genmap_aes128));
-    memcpy(payload + sizeof(header) + sizeof(pace_ecdh_genmap_aes128), pass, sizeof(pass));
-    bit_buffer_append_bytes(passy_reader->tx_buffer, payload, sizeof(payload));
+    uint8_t payload[ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128) + ARRAYSIZE(pass)];
+    memcpy(payload, header, ARRAYSIZE(header));
+    memcpy(
+        payload + ARRAYSIZE(header), pace_ecdh_genmap_aes128, ARRAYSIZE(pace_ecdh_genmap_aes128));
+    memcpy(
+        payload + ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128), pass, ARRAYSIZE(pass));
+    bit_buffer_append_bytes(passy_reader->tx_buffer, payload, ARRAYSIZE(payload));
     NfcCommand ret = passy_reader_send(passy_reader);
     if(ret != NfcCommandContinue) {
         FURI_LOG_I(TAG, "error send_mse_at");
         return ret;
     }
 
+    FURI_LOG_D(TAG, "success send_mse_at ");
+    return ret;
+}
+
+NfcCommand retrieve_nonce(PassyReader* passy_reader, uint8_t enc_nonce[NONCE_SIZE]) {
     uint8_t nonce_query[8] = {0x10, 0x86, 0x00, 0x00, 0x02, 0x7C, 0x00, 0x00};
-    bit_buffer_append_bytes(passy_reader->tx_buffer, nonce_query, sizeof(nonce_query));
-    // FuriThread.
-    ret = passy_reader_send(passy_reader);
+    bit_buffer_append_bytes(passy_reader->tx_buffer, nonce_query, ARRAYSIZE(nonce_query));
+    int ret = passy_reader_send(passy_reader);
     if(ret != NfcCommandContinue) {
         FURI_LOG_I(TAG, "error query nonce");
         return ret;
     }
-    bit_buffer_write_bytes(passy_reader->rx_buffer, enc_nonce, NONCE_SIZE);
+    const uint8_t* data = bit_buffer_get_data(passy_reader->rx_buffer);
+    memcpy(enc_nonce, data, NONCE_SIZE);
 
-    FURI_LOG_D(TAG, "success? send_mse_at and query nonce");
+    FURI_LOG_D(TAG, "success query nonce");
     return ret;
 }
 
@@ -233,7 +246,7 @@ bin_array encode_pub(uint8_t* public_point, size_t point_size) {
 	 */
 
     bin_array oid =
-        asn1_encode(pace_id, sizeof(pace_id), V_ASN1_UNIVERSAL, UNI_OBJECT_IDENTIFIER, 0);
+        asn1_encode(pace_id, ARRAYSIZE(pace_id), V_ASN1_UNIVERSAL, UNI_OBJECT_IDENTIFIER, 0);
     bin_array ecpoint =
         asn1_encode(public_point, point_size, V_ASN1_CONTEXT_SPECIFIC, EC_PUBLIC_POINT, 0);
     bin_array concat = bin_array_concat(oid, ecpoint);
@@ -259,9 +272,14 @@ char* strcat(char* b1, const char* b2) {
 }
 
 int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
-    uint8_t enc_nonce[NONCE_SIZE] = {0};
-    if(send_mse_at(passy_reader, enc_nonce) != NfcCommandContinue) {
+    if(send_mse_at(passy_reader) != NfcCommandContinue) {
         FURI_LOG_I(TAG, "send_mse_at failed");
+        return -4;
+    }
+
+    uint8_t enc_nonce[NONCE_SIZE] = {0};
+    if(retrieve_nonce(passy_reader, enc_nonce) != NfcCommandContinue) {
+        FURI_LOG_I(TAG, "retrieve nonce failed");
         return -4;
     }
 
@@ -270,25 +288,25 @@ int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
     char* dob = passy_reader->passy->date_of_birth;
     char* doe = passy_reader->passy->date_of_expiry;
     uint8_t mrz_buf[strlen(doc_n) + strlen(dob) + strlen(doe)];
-    memset(mrz_buf, 0, sizeof(mrz_buf));
+    memset(mrz_buf, 0, ARRAYSIZE(mrz_buf));
     uint8_t* mrz = (uint8_t*)strcat(strcat(strcat((char*)mrz_buf, doc_n), dob), doe);
-    if(mbedtls_sha1(mrz, sizeof(mrz_buf), mrz_sha1)) {
+    if(mbedtls_sha1(mrz, ARRAYSIZE(mrz_buf), mrz_sha1)) {
         FURI_LOG_I(TAG, "sha1 failed");
         return -1;
     }
     // correct - 7e2d2a41c74ea0b38cd36f863939bfa8e9032aad
-    passy_log_buffer(TAG, "mrz_sha:", mrz_sha1, sizeof(mrz_sha1));
+    passy_log_buffer(TAG, "mrz_sha:", mrz_sha1, ARRAYSIZE(mrz_sha1));
 
-    uint8_t emrz_buf[sizeof(mrz_sha1) + 4] = {0};
-    memcpy(emrz_buf, mrz_sha1, sizeof(mrz_sha1));
+    uint8_t emrz_buf[ARRAYSIZE(mrz_sha1) + 4] = {0};
+    memcpy(emrz_buf, mrz_sha1, ARRAYSIZE(mrz_sha1));
     //  KDF(enc_nonce, 3)
-    emrz_buf[sizeof(emrz_buf) - 1] = 3;
+    emrz_buf[ARRAYSIZE(emrz_buf) - 1] = 3;
     uint8_t kpi[20] = {0};
-    if(mbedtls_sha1(emrz_buf, sizeof(emrz_buf), kpi)) {
+    if(mbedtls_sha1(emrz_buf, ARRAYSIZE(emrz_buf), kpi)) {
         FURI_LOG_I(TAG, "sha1 failed");
         return -2;
     }
-    passy_log_buffer(TAG, "kpi:", kpi, sizeof(kpi));
+    passy_log_buffer(TAG, "kpi:", kpi, ARRAYSIZE(kpi));
 
     mbedtls_aes_context aes_ctx;
     mbedtls_aes_init(&aes_ctx);
@@ -300,31 +318,93 @@ int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
     uint8_t iv[16] = {0};
     uint8_t decrypted_nonce[16] = {0};
     notok = mbedtls_aes_crypt_cbc(
-        &aes_ctx, MBEDTLS_AES_DECRYPT, sizeof(decrypted_nonce), iv, enc_nonce, decrypted_nonce);
+        &aes_ctx, MBEDTLS_AES_DECRYPT, ARRAYSIZE(decrypted_nonce), iv, enc_nonce, decrypted_nonce);
     if(notok) {
         FURI_LOG_I(TAG, "error cbc\n");
         return -4;
     }
 
-    passy_log_buffer(TAG, "decrypted_nonce:", decrypted_nonce, sizeof(decrypted_nonce));
-    memcpy(dec_nonce, decrypted_nonce, sizeof(decrypted_nonce));
+    passy_log_buffer(TAG, "decrypted_nonce:", decrypted_nonce, ARRAYSIZE(decrypted_nonce));
+    memcpy(dec_nonce, decrypted_nonce, ARRAYSIZE(decrypted_nonce));
 
     return 0;
     // mse at
     // prepare mrz and shi
 }
 
-mbedtls_ecp_point get_mapping_data(const mbedtls_ecp_point* own_point) {
-    UNUSED(own_point);
-    mbedtls_ecp_point card_point;
-    mbedtls_ecp_point_init(&card_point);
-    // call generic authenticate
-    const char* c1_x = "824FBA91C9CBE26BEF53A0EBE7342A3BF178CEA9F45DE0B70AA601651FBA3F57";
-    const char* c1_y = "30D8C879AAA9C9F73991E61B58F4D52EB87A0A0C709A49DC63719363CCD13C54";
-    if(mbedtls_ecp_point_read_string(&card_point, 16, c1_x, c1_y)) {
-        FURI_LOG_I(TAG, "error reading card_point point\n");
+void thread_sleep(uint8_t sec) {
+    uint32_t ticks_per_sec = furi_kernel_get_tick_frequency();
+    if(sec == 0) {
+        sec = 1;
     }
-    return card_point;
+    uint32_t cur_ticks = furi_get_tick();
+    uint32_t needed_ticks = cur_ticks + ticks_per_sec * sec;
+    FURI_LOG_D(TAG, "taking a nap: %li . %li", needed_ticks, cur_ticks);
+    while(needed_ticks > cur_ticks) {
+        cur_ticks = furi_get_tick();
+    }
+    FURI_LOG_D(TAG, "finishing a nap");
+}
+
+int get_mapping_data(
+    PassyReader* passy_reader,
+    const mbedtls_ecp_group* grp,
+    const mbedtls_ecp_point* own_point,
+    mbedtls_ecp_point* card_point) {
+    mbedtls_ecp_point_init(card_point);
+    UNUSED(own_point);
+    // call generic authenticate
+    uint8_t header[] = {0x10, 0x86, 0x00, 0x00, 0xFF};
+    uint8_t* lc = &header[4];
+
+    uint8_t data[] = {0x7c, 0xFF, 0x81, 0xFF};
+    uint8_t* dyn_auth_len = &data[1];
+    uint8_t* mapping_data_len = &data[3];
+    size_t pointlen;
+    // just taking as big as possible to not make a second call to the function
+    uint8_t point_buff[250] = {0};
+    int ret = mbedtls_ecp_point_write_binary(
+        grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, sizeof(point_buff));
+    // memset(point_buff, 0, pointlen);
+    // int ret = mbedtls_ecp_point_write_binary(
+    //     grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, 0);
+    if(ret) {
+        FURI_LOG_I(TAG, "error exporting own point: %02x\n", ret);
+        return -1;
+    }
+
+    *mapping_data_len = pointlen;
+    *dyn_auth_len = *mapping_data_len + 2; // 0x81 + mapping_data_len
+    *lc = *dyn_auth_len + 2;
+    BitBuffer* tx = passy_reader->tx_buffer;
+    bit_buffer_append_bytes(tx, header, ARRAYSIZE(header));
+    bit_buffer_append_bytes(tx, data, ARRAYSIZE(data));
+    bit_buffer_append_bytes(tx, point_buff, pointlen);
+    bit_buffer_append_byte(tx, 0x00); //Le
+
+    ret = passy_reader_send(passy_reader);
+    if(ret != NfcCommandContinue) {
+        FURI_LOG_I(TAG, "error general authenticate\n");
+        return -2;
+    }
+
+    const uint8_t* response = bit_buffer_get_data(passy_reader->rx_buffer);
+    uint8_t len = response[3];
+    if(response[4] != 0x04) {
+        FURI_LOG_I(TAG, "point is not uncompressed?\n");
+    }
+
+    ret = mbedtls_ecp_point_read_binary(grp, card_point, (const uint8_t*)&response[5], len);
+    if(ret) {
+        FURI_LOG_I(TAG, "could not read point:  %02x\n", ret);
+        return -3;
+    }
+    // const char* c1_x = "824FBA91C9CBE26BEF53A0EBE7342A3BF178CEA9F45DE0B70AA601651FBA3F57";
+    // const char* c1_y = "30D8C879AAA9C9F73991E61B58F4D52EB87A0A0C709A49DC63719363CCD13C54";
+    // if(mbedtls_ecp_point_read_string(card_point, 16, c1_x, c1_y)) {
+    //     FURI_LOG_I(TAG, "error reading card_point point\n");
+    // }
+    return 0;
 }
 
 mbedtls_ecp_point map_nonce(
@@ -355,10 +435,6 @@ mbedtls_ecp_point map_nonce(
     }
     return mapped_G;
 }
-
-// need only 16 bytes as per 9.7.1.2 for aes-128
-#define AES_128_KS_SIZE 16
-#define KS_SIZE         AES_128_KS_SIZE
 
 // [out] own_pub
 // [out] card_point
@@ -403,7 +479,7 @@ int derive_shared_secret(
 
     const uint8_t shared_sec_size = 32, c_size = 4, c_enc = 1, c_mac = 2;
     uint8_t kdf_input[shared_sec_size + c_size];
-    memset(kdf_input, 0, sizeof(kdf_input));
+    memset(kdf_input, 0, ARRAYSIZE(kdf_input));
     uint8_t kdf_res[20] = {0};
     int ret = mbedtls_mpi_write_binary(&shared_secret_K, kdf_input, shared_sec_size);
     if(ret) {
@@ -412,16 +488,16 @@ int derive_shared_secret(
     }
 
     kdf_input[35] = c_enc;
-    ret = mbedtls_sha1(kdf_input, sizeof(kdf_input), kdf_res);
+    ret = mbedtls_sha1(kdf_input, ARRAYSIZE(kdf_input), kdf_res);
     if(ret) {
         FURI_LOG_I(TAG, "KS enc error\n");
         return -5;
     }
     memcpy(KSenc, kdf_res, KS_SIZE);
-    memset(kdf_res, 0, sizeof(kdf_res));
+    memset(kdf_res, 0, ARRAYSIZE(kdf_res));
 
     kdf_input[35] = c_mac;
-    ret = mbedtls_sha1(kdf_input, sizeof(kdf_input), kdf_res);
+    ret = mbedtls_sha1(kdf_input, ARRAYSIZE(kdf_input), kdf_res);
     if(ret) {
         FURI_LOG_I(TAG, "KS mac error\n");
         return -6;
@@ -439,14 +515,19 @@ int perform_mutual_auth(
     size_t olen = 0;
     uint8_t cpub2_uncomp[65] = {0};
     int ret = mbedtls_ecp_point_write_binary(
-        group, card_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, cpub2_uncomp, sizeof(cpub2_uncomp));
+        group,
+        card_point,
+        MBEDTLS_ECP_PF_UNCOMPRESSED,
+        &olen,
+        cpub2_uncomp,
+        ARRAYSIZE(cpub2_uncomp));
     if(ret) {
         FURI_LOG_I(TAG, "mbedtls_ecp_point_write_binary error\n");
         return -1;
     }
 
     uint8_t cmac_buff[16] = {0};
-    bin_array encoded_pub = encode_pub(cpub2_uncomp, sizeof(cpub2_uncomp));
+    bin_array encoded_pub = encode_pub(cpub2_uncomp, ARRAYSIZE(cpub2_uncomp));
 
     // todo
     const mbedtls_cipher_info_t* aes_cbc_info =
@@ -460,8 +541,8 @@ int perform_mutual_auth(
 
     //C2B0BD78 D94BA866
     uint8_t cmac[8];
-    memcpy(cmac, cmac_buff, sizeof(cmac));
-    passy_log_buffer(TAG, "cmac:", cmac, sizeof(cmac));
+    memcpy(cmac, cmac_buff, ARRAYSIZE(cmac));
+    passy_log_buffer(TAG, "cmac:", cmac, ARRAYSIZE(cmac));
 
     // send cmac and verify 9000
 
@@ -499,9 +580,13 @@ int authenticate_pace(PassyReader* reader) {
         return -2;
     }
 
+    mbedtls_ecp_point ephem_card_point;
+    ret = get_mapping_data(reader, &group, &ephem_own_point, &ephem_card_point);
+    if(ret) {
+        FURI_LOG_I(TAG, "error getting mapping data. ret: %d", ret);
+        return -2;
+    }
     return -55;
-    mbedtls_ecp_point ephem_card_point = get_mapping_data(&ephem_own_point);
-
     mbedtls_ecp_point G_tilda = map_nonce(&nonce, &ephem_card_point, &ephem_priv, &group);
 
     uint8_t KSenc[KS_SIZE] = {0}, KSmac[KS_SIZE] = {0};
@@ -541,12 +626,12 @@ void passy_read_big_file(
     int offset = 0;
     uint8_t* copy_region = result;
     do {
-        res = read_action(temp_buff, sizeof(temp_buff), offset);
+        res = read_action(temp_buff, ARRAYSIZE(temp_buff), offset);
         copy_region =
-            mempcpy(copy_region, temp_buff, sizeof(temp_buff)); // do not need to have 0x90000
-        offset += sizeof(temp_buff);
+            mempcpy(copy_region, temp_buff, ARRAYSIZE(temp_buff)); // do not need to have 0x90000
+        offset += ARRAYSIZE(temp_buff);
         // FURI_LOG_D(TAG, "reading. %d, offset: %d, ", res, offset, display);
-    } while(res == NfcCommandContinue && (offset + sizeof(temp_buff)) <= result_size);
+    } while(res == NfcCommandContinue && (offset + ARRAYSIZE(temp_buff)) <= result_size);
 }
 
 NfcCommand passy_reader_pace_authenticate(PassyReader* passy_reader) {
@@ -556,7 +641,7 @@ NfcCommand passy_reader_pace_authenticate(PassyReader* passy_reader) {
     // idk i cannot decode this shit
     // 31820124300d060804007f00070202020201023012060a04007f000702020302020201020201413012060a04007f0007020203020202010302014a3012060a04007f0007020204020202010202010d3012060a04007f0007020204060202010202010d301b060b04007f000702020b010203300902010102010002010102014a301c060904007f000702020302300c060704007f0007010202010d020141301c060904007f000702020302300c060704007f0007010202010d02014a302a060804007f0007020206161e687474703a2f2f6273692e62756e642e64652f6369662f6e70612e786d6c303e060804007f000702020831323012060a04007f00070202030202020102020145301c060904007f000702020302300c060704007f0007010202010d020145
     // uint8_t buff[300];
-    // memset(buff, 0, sizeof(buff));
+    // memset(buff, 0, ARRAYSIZE(buff));
 
     // //
     // NfcCommand ret = passy_reader_select_file(passy_reader, PassyReadDG14);
@@ -564,16 +649,16 @@ NfcCommand passy_reader_pace_authenticate(PassyReader* passy_reader) {
     //     return passy_reader_read_binary(passy_reader, offset, size, buff);
     // }
 
-    // passy_read_big_file(passy_reader, buff, sizeof(buff), read_binary);
+    // passy_read_big_file(passy_reader, buff, ARRAYSIZE(buff), read_binary);
 
-    // passy_log_buffer(TAG, "whole_cardAccess", buff, sizeof(buff));
-    // passy_log_buffer(TAG, "whole_cardAccess_part-2", buff + 128, sizeof(buff) - 128);
-    // passy_log_buffer(TAG, "whole_cardAccess_part-3", buff + 128 + 128, sizeof(buff) - 128 - 128);
+    // passy_log_buffer(TAG, "whole_cardAccess", buff, ARRAYSIZE(buff));
+    // passy_log_buffer(TAG, "whole_cardAccess_part-2", buff + 128, ARRAYSIZE(buff) - 128);
+    // passy_log_buffer(TAG, "whole_cardAccess_part-3", buff + 128 + 128, ARRAYSIZE(buff) - 128 - 128);
 
     //ret = passy_reader_select_file(passy_reader, EF_Dir);
-    // memset(buff, 0, sizeof(buff));
+    // memset(buff, 0, ARRAYSIZE(buff));
 
-    // passy_reader_read_binary(passy_reader, 0, sizeof(buff), buff);
+    // passy_reader_read_binary(passy_reader, 0, ARRAYSIZE(buff), buff);
 
     // section 4.4.3 and 9.2.3 for  0x80 data
     // command (p89) cla ins p1 p2 Le
@@ -622,11 +707,11 @@ Authentication (see Section 5.1);
             // 0x // idk
         };
         bit_buffer_free(passy_reader->tx_buffer);
-        uint8_t payload[sizeof(header) + sizeof(data)];
-        memcpy(payload, header, sizeof(header));
-        memcpy(payload + sizeof(header), data, sizeof(data));
-        BitBuffer* tx = bit_buffer_alloc(sizeof(payload));
-        bit_buffer_copy_bytes(tx, payload, sizeof(payload));
+        uint8_t payload[ARRAYSIZE(header) + ARRAYSIZE(data)];
+        memcpy(payload, header, ARRAYSIZE(header));
+        memcpy(payload + ARRAYSIZE(header), data, ARRAYSIZE(data));
+        BitBuffer* tx = bit_buffer_alloc(ARRAYSIZE(payload));
+        bit_buffer_copy_bytes(tx, payload, ARRAYSIZE(payload));
         passy_reader->tx_buffer = tx;
         passy_reader_send(passy_reader);
     }
@@ -640,8 +725,8 @@ Authentication (see Section 5.1);
 
         const int response_size = 22;
         BitBuffer* rx = bit_buffer_alloc(response_size);
-        BitBuffer* tx = bit_buffer_alloc(sizeof(req));
-        bit_buffer_copy_bytes(tx, req, sizeof(req));
+        BitBuffer* tx = bit_buffer_alloc(ARRAYSIZE(req));
+        bit_buffer_copy_bytes(tx, req, ARRAYSIZE(req));
         passy_reader->tx_buffer = tx;
         passy_reader->rx_buffer = rx;
         passy_reader_send(passy_reader);
@@ -668,39 +753,39 @@ Authentication (see Section 5.1);
     // // TODO: move into secure_messaging
     // SecureMessaging* secure_messaging = passy_reader->secure_messaging;
     // uint8_t S[32];
-    // memset(S, 0, sizeof(S));
+    // memset(S, 0, ARRAYSIZE(S));
     // uint8_t eifd[32];
-    // memcpy(S, secure_messaging->rndIFD, sizeof(secure_messaging->rndIFD));
+    // memcpy(S, secure_messaging->rndIFD, ARRAYSIZE(secure_messaging->rndIFD));
     // memcpy(
-    //     S + sizeof(secure_messaging->rndIFD),
+    //     S + ARRAYSIZE(secure_messaging->rndIFD),
     //     secure_messaging->rndICC,
-    //     sizeof(secure_messaging->rndICC));
+    //     ARRAYSIZE(secure_messaging->rndICC));
     // memcpy(
-    //     S + sizeof(secure_messaging->rndIFD) + sizeof(secure_messaging->rndICC),
+    //     S + ARRAYSIZE(secure_messaging->rndIFD) + ARRAYSIZE(secure_messaging->rndICC),
     //     secure_messaging->Kifd,
-    //     sizeof(secure_messaging->Kifd));
+    //     ARRAYSIZE(secure_messaging->Kifd));
 
     // uint8_t iv[8];
-    // memset(iv, 0, sizeof(iv));
+    // memset(iv, 0, ARRAYSIZE(iv));
     // mbedtls_des3_context ctx;
     // mbedtls_des3_init(&ctx);
     // mbedtls_des3_set2key_enc(&ctx, secure_messaging->KENC);
-    // mbedtls_des3_crypt_cbc(&ctx, MBEDTLS_DES_ENCRYPT, sizeof(S), iv, S, eifd);
+    // mbedtls_des3_crypt_cbc(&ctx, MBEDTLS_DES_ENCRYPT, ARRAYSIZE(S), iv, S, eifd);
     // mbedtls_des3_free(&ctx);
 
-    // passy_log_buffer(TAG, "S", S, sizeof(S));
-    // passy_log_buffer(TAG, "eifd", eifd, sizeof(eifd));
+    // passy_log_buffer(TAG, "S", S, ARRAYSIZE(S));
+    // passy_log_buffer(TAG, "eifd", eifd, ARRAYSIZE(eifd));
 
     // uint8_t mifd[8];
-    // passy_mac(secure_messaging->KMAC, eifd, sizeof(eifd), mifd, false);
-    // passy_log_buffer(TAG, "mifd", mifd, sizeof(mifd));
+    // passy_mac(secure_messaging->KMAC, eifd, ARRAYSIZE(eifd), mifd, false);
+    // passy_log_buffer(TAG, "mifd", mifd, ARRAYSIZE(mifd));
 
     // uint8_t authenticate_header[] = {0x00, 0x82, 0x00, 0x00};
 
-    // bit_buffer_append_bytes(tx_buffer, authenticate_header, sizeof(authenticate_header));
-    // bit_buffer_append_byte(tx_buffer, sizeof(eifd) + sizeof(mifd));
-    // bit_buffer_append_bytes(tx_buffer, eifd, sizeof(eifd));
-    // bit_buffer_append_bytes(tx_buffer, mifd, sizeof(mifd));
+    // bit_buffer_append_bytes(tx_buffer, authenticate_header, ARRAYSIZE(authenticate_header));
+    // bit_buffer_append_byte(tx_buffer, ARRAYSIZE(eifd) + ARRAYSIZE(mifd));
+    // bit_buffer_append_bytes(tx_buffer, eifd, ARRAYSIZE(eifd));
+    // bit_buffer_append_bytes(tx_buffer, mifd, ARRAYSIZE(mifd));
     // bit_buffer_append_byte(tx_buffer, 0); // Le
 
     // ret = passy_reader_send(passy_reader);
@@ -713,7 +798,7 @@ Authentication (see Section 5.1);
     // const uint8_t* mac = data + length - 2 - 8;
     // uint8_t calculated_mac[8];
     // passy_mac(secure_messaging->KMAC, (uint8_t*)data, length - 8 - 2, calculated_mac, false);
-    // if(memcmp(mac, calculated_mac, sizeof(calculated_mac)) != 0) {
+    // if(memcmp(mac, calculated_mac, ARRAYSIZE(calculated_mac)) != 0) {
     //     FURI_LOG_W(TAG, "Invalid MAC");
     //     return NfcCommandStop;
     // }
@@ -721,7 +806,7 @@ Authentication (see Section 5.1);
     // uint8_t decrypted[32];
     // do {
     //     uint8_t iv[8];
-    //     memset(iv, 0, sizeof(iv));
+    //     memset(iv, 0, ARRAYSIZE(iv));
 
     //     mbedtls_des3_context ctx;
     //     mbedtls_des3_init(&ctx);
@@ -731,19 +816,19 @@ Authentication (see Section 5.1);
     // } while(false);
 
     // if(print_logs) {
-    //     passy_log_buffer(TAG, "decrypted", decrypted, sizeof(decrypted));
+    //     passy_log_buffer(TAG, "decrypted", decrypted, ARRAYSIZE(decrypted));
     // }
 
     // uint8_t* rnd_icc = decrypted;
     // uint8_t* rnd_ifd = decrypted + 8;
     // uint8_t* Kicc = decrypted + 16;
 
-    // if(memcmp(rnd_icc, secure_messaging->rndICC, sizeof(secure_messaging->rndICC)) != 0) {
+    // if(memcmp(rnd_icc, secure_messaging->rndICC, ARRAYSIZE(secure_messaging->rndICC)) != 0) {
     //     FURI_LOG_W(TAG, "Invalid rndICC");
     //     return NfcCommandStop;
     // }
 
-    // memcpy(secure_messaging->Kicc, Kicc, sizeof(secure_messaging->Kicc));
+    // memcpy(secure_messaging->Kicc, Kicc, ARRAYSIZE(secure_messaging->Kicc));
     // memcpy(secure_messaging->SSC + 0, rnd_icc + 4, 4);
     // memcpy(secure_messaging->SSC + 4, rnd_ifd + 4, 4);
 
