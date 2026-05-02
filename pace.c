@@ -271,7 +271,11 @@ char* strcat(char* b1, const char* b2) {
     return b1_p;
 }
 
-int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
+int get_nonce(
+    PassyReader* passy_reader,
+    mbedtls_mpi* dec_nonce,
+    const mbedtls_ecp_point* ephem_own_point) {
+    UNUSED(ephem_own_point);
     if(send_mse_at(passy_reader) != NfcCommandContinue) {
         FURI_LOG_I(TAG, "send_mse_at failed");
         return -4;
@@ -351,8 +355,8 @@ int get_mapping_data(
     const mbedtls_ecp_group* grp,
     const mbedtls_ecp_point* own_point,
     mbedtls_ecp_point* card_point) {
-    mbedtls_ecp_point_init(card_point);
-    UNUSED(own_point);
+    //UNUSED(own_point);
+
     // call generic authenticate
     uint8_t header[] = {0x10, 0x86, 0x00, 0x00, 0xFF};
     uint8_t* lc = &header[4];
@@ -360,18 +364,19 @@ int get_mapping_data(
     uint8_t data[] = {0x7c, 0xFF, 0x81, 0xFF};
     uint8_t* dyn_auth_len = &data[1];
     uint8_t* mapping_data_len = &data[3];
-    size_t pointlen;
+    size_t pointlen = 0;
     // just taking as big as possible to not make a second call to the function
-    uint8_t point_buff[250] = {0};
+    uint8_t point_buff[65] = {0};
     int ret = mbedtls_ecp_point_write_binary(
-        grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, sizeof(point_buff));
+        grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, ARRAYSIZE(point_buff));
     // memset(point_buff, 0, pointlen);
     // int ret = mbedtls_ecp_point_write_binary(
     //     grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, 0);
     if(ret) {
-        FURI_LOG_I(TAG, "error exporting own point: %02x\n", ret);
+        FURI_LOG_I(TAG, "error exporting own point: %02x. pointlen: %d\n", ret, pointlen);
         return -1;
     }
+    return -3;
 
     *mapping_data_len = pointlen;
     *dyn_auth_len = *mapping_data_len + 2; // 0x81 + mapping_data_len
@@ -394,6 +399,7 @@ int get_mapping_data(
         FURI_LOG_I(TAG, "point is not uncompressed?\n");
     }
 
+    mbedtls_ecp_point_init(card_point);
     ret = mbedtls_ecp_point_read_binary(grp, card_point, (const uint8_t*)&response[5], len);
     if(ret) {
         FURI_LOG_I(TAG, "could not read point:  %02x\n", ret);
@@ -574,7 +580,7 @@ int authenticate_pace(PassyReader* reader) {
     }
 
     mbedtls_mpi nonce;
-    ret = get_nonce(reader, &nonce);
+    ret = get_nonce(reader, &nonce, &ephem_own_point);
     if(ret) {
         FURI_LOG_I(TAG, "error decrypting nonce. ret: %d", ret);
         return -2;
