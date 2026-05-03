@@ -347,7 +347,7 @@ void thread_sleep(uint8_t sec) {
     FURI_LOG_D(TAG, "finishing a nap");
 }
 
-int get_mapping_data(
+int general_authenticate(
     PassyReader* passy_reader,
     const mbedtls_ecp_group* grp,
     const mbedtls_ecp_point* own_point,
@@ -364,9 +364,6 @@ int get_mapping_data(
     uint8_t point_buff[200] = {0};
     int ret = mbedtls_ecp_point_write_binary(
         grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, ARRAYSIZE(point_buff));
-    // memset(point_buff, 0, pointlen);
-    // int ret = mbedtls_ecp_point_write_binary(
-    //     grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, 0);
     if(ret) {
         FURI_LOG_I(TAG, "error exporting own point: %02x. pointlen: %d\n", ret, pointlen);
         return -1;
@@ -399,11 +396,6 @@ int get_mapping_data(
         FURI_LOG_I(TAG, "could not read point:  %02x\n", ret);
         return -3;
     }
-    // const char* c1_x = "824FBA91C9CBE26BEF53A0EBE7342A3BF178CEA9F45DE0B70AA601651FBA3F57";
-    // const char* c1_y = "30D8C879AAA9C9F73991E61B58F4D52EB87A0A0C709A49DC63719363CCD13C54";
-    // if(mbedtls_ecp_point_read_string(card_point, 16, c1_x, c1_y)) {
-    //     FURI_LOG_I(TAG, "error reading card_point point\n");
-    // }
     FURI_LOG_I(TAG, "general auth success\n");
     return 0;
 }
@@ -417,7 +409,7 @@ mbedtls_ecp_point map_nonce(
     mbedtls_ecp_point_init(&S);
     int ret = mbedtls_ecp_mul(group, &S, private, card_pub, f_rng, NULL);
     if(ret) {
-        FURI_LOG_I(TAG, "error mbedtls_ecp_mul\n");
+        FURI_LOG_I(TAG, "error mbedtls_ecp_mul: %02x\n", ret);
         return (mbedtls_ecp_point){0};
     }
 
@@ -431,7 +423,7 @@ mbedtls_ecp_point map_nonce(
     ret = mbedtls_ecp_mul(group, &mapped_G, nonce, &S, f_rng, NULL);
     mbedtls_ecp_muladd(group, &mapped_G, nonce, &group->G, &one, &S);
     if(ret) {
-        FURI_LOG_I(TAG, "error mbedtls_ecp_mul\n");
+        FURI_LOG_I(TAG, "error mbedtls_ecp_mul: %02x\n", ret);
         return (mbedtls_ecp_point){0};
     }
     return mapped_G;
@@ -445,29 +437,32 @@ int derive_shared_secret(
     mbedtls_ecp_group group,
     const mbedtls_ecp_point* G_tilda,
     mbedtls_ecp_point* own_pub,
-    mbedtls_ecp_point* card_point) {
-    UNUSED(own_pub);
+    mbedtls_ecp_point* card_point,
+    PassyReader* passy_reader) {
     mbedtls_mpi priv;
-    mbedtls_ecp_point pub;
     mbedtls_mpi_init(&priv);
-    mbedtls_ecp_point_init(&pub);
 
     group.G = *G_tilda; //? mb not needed idk
-    if(mbedtls_ecp_gen_keypair(&group, &priv, &pub, f_rng, NULL)) {
-        FURI_LOG_I(TAG, "error generating ephermal keypair");
+    if(mbedtls_ecp_gen_keypair(&group, &priv, own_pub, f_rng, NULL)) {
+        FURI_LOG_I(TAG, "error generating second ephermal keypair");
         return -1;
     }
 
     // todo need to do this in another function probably
     // send pub key and get client pub
 
-    mbedtls_ecp_point_init(card_point);
-    const char* c2_x = "9E880F842905B8B3181F7AF7CAA9F0EFB743847F44A306D2D28C1D9EC65DF6DB";
-    const char* c2_y = "7764B22277A2EDDC3C265A9F018F9CB852E111B768B326904B59A0193776F094";
-    if(mbedtls_ecp_point_read_string(card_point, 16, c2_x, c2_y)) {
-        FURI_LOG_I(TAG, "error reading card_point point\n");
-        return -2;
+    int ret = general_authenticate(passy_reader, &group, own_pub, card_point);
+    if(ret) {
+        FURI_LOG_I(TAG, "error general_authenticate 2: %d", ret);
+        return -1;
     }
+    // mbedtls_ecp_point_init(card_point);
+    // const char* c2_x = "9E880F842905B8B3181F7AF7CAA9F0EFB743847F44A306D2D28C1D9EC65DF6DB";
+    // const char* c2_y = "7764B22277A2EDDC3C265A9F018F9CB852E111B768B326904B59A0193776F094";
+    // if(mbedtls_ecp_point_read_string(card_point, 16, c2_x, c2_y)) {
+    //     FURI_LOG_I(TAG, "error reading card_point point\n");
+    //     return -2;
+    // }
 
     mbedtls_ecp_point H;
     mbedtls_ecp_point_init(&H);
@@ -482,7 +477,7 @@ int derive_shared_secret(
     uint8_t kdf_input[shared_sec_size + c_size];
     memset(kdf_input, 0, ARRAYSIZE(kdf_input));
     uint8_t kdf_res[20] = {0};
-    int ret = mbedtls_mpi_write_binary(&shared_secret_K, kdf_input, shared_sec_size);
+    ret = mbedtls_mpi_write_binary(&shared_secret_K, kdf_input, shared_sec_size);
     if(ret) {
         FURI_LOG_I(TAG, "mbedtls_mpi_write_binary error\n");
         return -4;
@@ -507,47 +502,77 @@ int derive_shared_secret(
     return 0;
 }
 
-int perform_mutual_auth(
+#define AUTH_TOKEN_SIZE 8
+int compute_auth_token(
     const uint8_t KSmac[KS_SIZE],
-    const mbedtls_ecp_point* card_point,
-    mbedtls_ecp_group* group) {
-    UNUSED(KSmac);
-    //mbedtls_aes_cmac_prf_128
+    const mbedtls_ecp_point* point,
+    const mbedtls_ecp_group* group,
+    uint8_t token[AUTH_TOKEN_SIZE]) {
     size_t olen = 0;
     uint8_t cpub2_uncomp[65] = {0};
     int ret = mbedtls_ecp_point_write_binary(
-        group,
-        card_point,
-        MBEDTLS_ECP_PF_UNCOMPRESSED,
-        &olen,
-        cpub2_uncomp,
-        ARRAYSIZE(cpub2_uncomp));
+        group, point, MBEDTLS_ECP_PF_UNCOMPRESSED, &olen, cpub2_uncomp, ARRAYSIZE(cpub2_uncomp));
     if(ret) {
-        FURI_LOG_I(TAG, "mbedtls_ecp_point_write_binary error\n");
+        FURI_LOG_I(TAG, "mbedtls_ecp_point_write_binary error: %02x\n", ret);
         return -1;
     }
 
-    uint8_t cmac_buff[16] = {0};
+    uint8_t tok_buff[16] = {0};
     bin_array encoded_pub = encode_pub(cpub2_uncomp, ARRAYSIZE(cpub2_uncomp));
 
-    // todo
     const mbedtls_cipher_info_t* aes_cbc_info =
         mbedtls_cipher_info_from_type(MBEDTLS_CIPHER_AES_128_ECB);
     ret = mbedtls_cipher_cmac(
-        aes_cbc_info, KSmac, KS_SIZE * 8, encoded_pub.data, encoded_pub.size, cmac_buff);
+        aes_cbc_info, KSmac, KS_SIZE * 8, encoded_pub.data, encoded_pub.size, tok_buff);
     if(ret) {
-        FURI_LOG_I(TAG, "cmac error\n");
+        FURI_LOG_I(TAG, "cmac error %02x\n", ret);
         return -2;
     }
 
     //C2B0BD78 D94BA866
-    uint8_t cmac[8];
-    memcpy(cmac, cmac_buff, ARRAYSIZE(cmac));
-    passy_log_buffer(TAG, "cmac:", cmac, ARRAYSIZE(cmac));
+    memcpy(token, tok_buff, AUTH_TOKEN_SIZE);
+    passy_log_buffer(TAG, "compute tok success:", token, AUTH_TOKEN_SIZE);
+    bin_array_free(&encoded_pub);
+    return 0;
+}
+
+int perform_mutual_auth(
+    const uint8_t KSmac[KS_SIZE],
+    const mbedtls_ecp_point* card_point,
+    const mbedtls_ecp_point* own_point,
+    const mbedtls_ecp_group* group,
+    PassyReader* passy_reader) {
+    uint8_t t_ifd[AUTH_TOKEN_SIZE] = {0};
+    uint8_t t_ic[AUTH_TOKEN_SIZE] = {0};
+
+    if(compute_auth_token(KSmac, card_point, group, t_ifd)) {
+        return -1;
+    }
+    if(compute_auth_token(KSmac, own_point, group, t_ic)) {
+        return -2;
+    }
 
     // send cmac and verify 9000
+    uint8_t header[] = {0x00, 0x86, 0x00, 0x00, 0x0C, 0x7C, 0x0A, 0x85, 0x08};
+    bit_buffer_append_bytes(passy_reader->tx_buffer, header, ARRAYSIZE(header));
+    bit_buffer_append_bytes(passy_reader->tx_buffer, t_ifd, ARRAYSIZE(t_ifd));
+    bit_buffer_append_byte(passy_reader->tx_buffer, 0x00);
 
-    bin_array_free(&encoded_pub);
+    int ret = passy_reader_send(passy_reader);
+    if(ret != NfcCommandContinue) {
+        FURI_LOG_I(TAG, "exchange cmac error\n");
+        return -3;
+    }
+
+    const uint8_t* data = bit_buffer_get_data(passy_reader->rx_buffer);
+    const uint8_t* t_ic_ret = &data[4];
+    ret = memcmp(t_ic_ret, t_ic, AUTH_TOKEN_SIZE);
+    if(ret) {
+        FURI_LOG_I(TAG, "auth tokens differ: %d\n", ret);
+        return -4;
+    }
+
+    FURI_LOG_I(TAG, "exchange cmac success\n");
     return 0;
 }
 
@@ -582,7 +607,7 @@ int authenticate_pace(PassyReader* reader) {
     }
 
     mbedtls_ecp_point ephem_card_point;
-    ret = get_mapping_data(reader, &group, &ephem_own_point, &ephem_card_point);
+    ret = general_authenticate(reader, &group, &ephem_own_point, &ephem_card_point);
     if(ret) {
         FURI_LOG_I(TAG, "error getting mapping data. ret: %d", ret);
         return -2;
@@ -590,13 +615,16 @@ int authenticate_pace(PassyReader* reader) {
     mbedtls_ecp_point G_tilda = map_nonce(&nonce, &ephem_card_point, &ephem_priv, &group);
 
     uint8_t KSenc[KS_SIZE] = {0}, KSmac[KS_SIZE] = {0};
-    if(derive_shared_secret(KSenc, KSmac, group, &G_tilda, &ephem_own_point, &ephem_card_point)) {
-        FURI_LOG_I(TAG, "deriving shared error");
+    ret = derive_shared_secret(
+        KSenc, KSmac, group, &G_tilda, &ephem_own_point, &ephem_card_point, reader);
+    if(ret) {
+        FURI_LOG_I(TAG, "deriving shared error: %d", ret);
         return -3;
     }
 
-    if(perform_mutual_auth(KSmac, &ephem_card_point, &group)) {
-        FURI_LOG_I(TAG, "mutual auth fail");
+    ret = perform_mutual_auth(KSmac, &ephem_card_point, &ephem_own_point, &group, reader);
+    if(ret) {
+        FURI_LOG_I(TAG, "mutual auth fail: %d", ret);
         return -4;
     }
 
