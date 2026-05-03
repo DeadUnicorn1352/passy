@@ -26,56 +26,12 @@
 
 #define ARRAYSIZE(x) (sizeof x / sizeof x[0])
 
+#define AUTH_TOKEN_SIZE 8
+
 int f_rng(void*, unsigned char* buff, size_t size) {
     furi_hal_random_fill_buf(buff, size);
     //passy_log_buffer(TAG, "frng", buff, size);
     return 0;
-}
-
-NfcCommand send_mse_at(PassyReader* passy_reader) {
-    FURI_LOG_D(TAG, "start send_mse_at");
-    uint8_t lc = 0x0F; // todo: constant lc
-    uint8_t header[5] = {0x00, 0x22, 0xC1, 0xA4, lc};
-    enum pass_type {
-        MRZ = 0x01,
-        CAN = 0x02,
-        PIN = 0x03
-    };
-    uint8_t pace_ecdh_genmap_aes128[12] = {
-        0x80, 0x0A, 0x04, 0x00, 0x7F, 0x00, 0x07, 0x02, 0x02, 0x04, 0x02, 0x02};
-    uint8_t pass[3] = {0x83, 0x01, MRZ};
-
-    // todo can be optimized
-    uint8_t payload[ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128) + ARRAYSIZE(pass)];
-    memcpy(payload, header, ARRAYSIZE(header));
-    memcpy(
-        payload + ARRAYSIZE(header), pace_ecdh_genmap_aes128, ARRAYSIZE(pace_ecdh_genmap_aes128));
-    memcpy(
-        payload + ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128), pass, ARRAYSIZE(pass));
-    bit_buffer_append_bytes(passy_reader->tx_buffer, payload, ARRAYSIZE(payload));
-    NfcCommand ret = passy_reader_send(passy_reader);
-    if(ret != NfcCommandContinue) {
-        FURI_LOG_I(TAG, "error send_mse_at");
-        return ret;
-    }
-
-    FURI_LOG_D(TAG, "success send_mse_at ");
-    return ret;
-}
-
-NfcCommand retrieve_nonce(PassyReader* passy_reader, uint8_t enc_nonce[NONCE_SIZE]) {
-    uint8_t nonce_query[8] = {0x10, 0x86, 0x00, 0x00, 0x02, 0x7C, 0x00, 0x00};
-    bit_buffer_append_bytes(passy_reader->tx_buffer, nonce_query, ARRAYSIZE(nonce_query));
-    int ret = passy_reader_send(passy_reader);
-    if(ret != NfcCommandContinue) {
-        FURI_LOG_I(TAG, "error query nonce");
-        return ret;
-    }
-    const uint8_t* data = bit_buffer_get_data(passy_reader->rx_buffer);
-    memcpy(enc_nonce, data, NONCE_SIZE);
-
-    FURI_LOG_D(TAG, "success query nonce");
-    return ret;
 }
 
 enum DATA_TAG {
@@ -271,6 +227,52 @@ char* strcat(char* b1, const char* b2) {
     return b1_p;
 }
 
+NfcCommand send_mse_at(PassyReader* passy_reader) {
+    FURI_LOG_D(TAG, "start send_mse_at");
+    uint8_t lc = 0x0F; // todo: constant lc
+    uint8_t header[5] = {0x00, 0x22, 0xC1, 0xA4, lc};
+    enum pass_type {
+        MRZ = 0x01,
+        CAN = 0x02,
+        PIN = 0x03
+    };
+    uint8_t pace_ecdh_genmap_aes128[12] = {
+        0x80, 0x0A, 0x04, 0x00, 0x7F, 0x00, 0x07, 0x02, 0x02, 0x04, 0x02, 0x02};
+    uint8_t pass[3] = {0x83, 0x01, MRZ};
+
+    // todo can be optimized
+    uint8_t payload[ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128) + ARRAYSIZE(pass)];
+    memcpy(payload, header, ARRAYSIZE(header));
+    memcpy(
+        payload + ARRAYSIZE(header), pace_ecdh_genmap_aes128, ARRAYSIZE(pace_ecdh_genmap_aes128));
+    memcpy(
+        payload + ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128), pass, ARRAYSIZE(pass));
+    bit_buffer_append_bytes(passy_reader->tx_buffer, payload, ARRAYSIZE(payload));
+    NfcCommand ret = passy_reader_send(passy_reader);
+    if(ret != NfcCommandContinue) {
+        FURI_LOG_I(TAG, "error send_mse_at");
+        return ret;
+    }
+
+    FURI_LOG_D(TAG, "success send_mse_at ");
+    return ret;
+}
+
+NfcCommand retrieve_nonce(PassyReader* passy_reader, uint8_t enc_nonce[NONCE_SIZE]) {
+    uint8_t nonce_query[8] = {0x10, 0x86, 0x00, 0x00, 0x02, 0x7C, 0x00, 0x00};
+    bit_buffer_append_bytes(passy_reader->tx_buffer, nonce_query, ARRAYSIZE(nonce_query));
+    int ret = passy_reader_send(passy_reader);
+    if(ret != NfcCommandContinue) {
+        FURI_LOG_I(TAG, "error query nonce");
+        return ret;
+    }
+    const uint8_t* data = bit_buffer_get_data(passy_reader->rx_buffer);
+    memcpy(enc_nonce, data, NONCE_SIZE);
+
+    FURI_LOG_D(TAG, "success query nonce");
+    return ret;
+}
+
 int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
     if(send_mse_at(passy_reader) != NfcCommandContinue) {
         FURI_LOG_I(TAG, "send_mse_at failed");
@@ -386,12 +388,9 @@ int general_authenticate(
 
     const uint8_t* response = bit_buffer_get_data(passy_reader->rx_buffer);
     uint8_t len = response[3];
-    if(response[4] != 0x04) {
-        FURI_LOG_I(TAG, "point is not uncompressed?\n");
-    }
 
     mbedtls_ecp_point_init(card_point);
-    ret = mbedtls_ecp_point_read_binary(grp, card_point, (const uint8_t*)&response[4], len);
+    ret = mbedtls_ecp_point_read_binary(grp, card_point, &response[4], len);
     if(ret) {
         FURI_LOG_I(TAG, "could not read point:  %02x\n", ret);
         return -3;
@@ -454,7 +453,7 @@ int derive_shared_secret(
     int ret = general_authenticate(passy_reader, &group, own_pub, card_point);
     if(ret) {
         FURI_LOG_I(TAG, "error general_authenticate 2: %d", ret);
-        return -1;
+        return -2;
     }
     // mbedtls_ecp_point_init(card_point);
     // const char* c2_x = "9E880F842905B8B3181F7AF7CAA9F0EFB743847F44A306D2D28C1D9EC65DF6DB";
@@ -502,7 +501,6 @@ int derive_shared_secret(
     return 0;
 }
 
-#define AUTH_TOKEN_SIZE 8
 int compute_auth_token(
     const uint8_t KSmac[KS_SIZE],
     const mbedtls_ecp_point* point,
