@@ -229,25 +229,26 @@ char* strcat(char* b1, const char* b2) {
 
 NfcCommand send_mse_at(PassyReader* passy_reader) {
     FURI_LOG_D(TAG, "start send_mse_at");
-    uint8_t lc = 0x0F; // todo: constant lc
-    uint8_t header[5] = {0x00, 0x22, 0xC1, 0xA4, lc};
+    uint8_t header[5] = {0x00, 0x22, 0xC1, 0xA4, 0xFF};
+    uint8_t* lc = &header[4];
     enum pass_type {
         MRZ = 0x01,
         CAN = 0x02,
-        PIN = 0x03
+        PIN = 0x03,
+        PUK = 0x04
     };
     uint8_t pace_ecdh_genmap_aes128[12] = {
         0x80, 0x0A, 0x04, 0x00, 0x7F, 0x00, 0x07, 0x02, 0x02, 0x04, 0x02, 0x02};
-    uint8_t pass[3] = {0x83, 0x01, MRZ};
+    uint8_t pass[3] = {0x83, 0x01, PIN};
+    uint8_t private_key_reference[3] = {0x84, 0x01, 0x0D}; // paceinfo parameter id
+    uint8_t chat_[] = {}; //cert holder auth template
 
-    // todo can be optimized
-    uint8_t payload[ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128) + ARRAYSIZE(pass)];
-    memcpy(payload, header, ARRAYSIZE(header));
-    memcpy(
-        payload + ARRAYSIZE(header), pace_ecdh_genmap_aes128, ARRAYSIZE(pace_ecdh_genmap_aes128));
-    memcpy(
-        payload + ARRAYSIZE(header) + ARRAYSIZE(pace_ecdh_genmap_aes128), pass, ARRAYSIZE(pass));
-    bit_buffer_append_bytes(passy_reader->tx_buffer, payload, ARRAYSIZE(payload));
+    *lc = sizeof(pace_ecdh_genmap_aes128) + sizeof(pass) + sizeof(private_key_reference);
+    BitBuffer* tx = passy_reader->tx_buffer;
+    bit_buffer_append_bytes(tx, header, ARRAYSIZE(header));
+    bit_buffer_append_bytes(tx, pace_ecdh_genmap_aes128, ARRAYSIZE(pace_ecdh_genmap_aes128));
+    bit_buffer_append_bytes(tx, pass, ARRAYSIZE(pass));
+    bit_buffer_append_bytes(tx, private_key_reference, ARRAYSIZE(private_key_reference));
     NfcCommand ret = passy_reader_send(passy_reader);
     if(ret != NfcCommandContinue) {
         FURI_LOG_I(TAG, "error send_mse_at");
@@ -291,8 +292,9 @@ int get_nonce(PassyReader* passy_reader, mbedtls_mpi* dec_nonce) {
     char* doe = passy_reader->passy->date_of_expiry;
     uint8_t mrz_buf[strlen(doc_n) + strlen(dob) + strlen(doe)];
     memset(mrz_buf, 0, ARRAYSIZE(mrz_buf));
-    uint8_t* mrz = (uint8_t*)strcat(strcat(strcat((char*)mrz_buf, doc_n), dob), doe);
-    if(mbedtls_sha1(mrz, ARRAYSIZE(mrz_buf), mrz_sha1)) {
+    // uint8_t* mrz = (uint8_t*)strcat(strcat(strcat((char*)mrz_buf, doc_n), dob), doe);
+    uint8_t mrz[] = "916348";
+    if(mbedtls_sha1(mrz, ARRAYSIZE(mrz), mrz_sha1)) {
         FURI_LOG_I(TAG, "sha1 failed");
         return -1;
     }
@@ -363,7 +365,7 @@ int general_authenticate(
     uint8_t* mapping_data_len = &data[3];
     size_t pointlen = 0;
     // just taking as big as possible to not make a second call to the function
-    uint8_t point_buff[200] = {0};
+    uint8_t point_buff[70] = {0};
     int ret = mbedtls_ecp_point_write_binary(
         grp, own_point, MBEDTLS_ECP_PF_UNCOMPRESSED, &pointlen, point_buff, ARRAYSIZE(point_buff));
     if(ret) {
@@ -382,7 +384,7 @@ int general_authenticate(
 
     ret = passy_reader_send(passy_reader);
     if(ret != NfcCommandContinue) {
-        FURI_LOG_I(TAG, "error general authenticate\n");
+        FURI_LOG_I(TAG, "error general authenticate: %d\n", ret);
         return -2;
     }
 
@@ -430,6 +432,8 @@ mbedtls_ecp_point map_nonce(
 
 // [out] own_pub
 // [out] card_point
+// [out] KSenc
+// [out] KSmac
 int derive_shared_secret(
     uint8_t KSenc[KS_SIZE],
     uint8_t KSmac[KS_SIZE],
@@ -440,6 +444,7 @@ int derive_shared_secret(
     PassyReader* passy_reader) {
     mbedtls_mpi priv;
     mbedtls_mpi_init(&priv);
+    mbedtls_ecp_point_init(own_pub);
 
     group.G = *G_tilda; //? mb not needed idk
     if(mbedtls_ecp_gen_keypair(&group, &priv, own_pub, f_rng, NULL)) {
